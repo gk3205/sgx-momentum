@@ -10,32 +10,39 @@ const TIE_THRESHOLD = 0.5;
 const TOP_SECTORS   = 3;
 const SCORE_NAMES   = 5;
 const MIN_VALID     = 3;
-const BATCH_SIZE    = 8;  // tickers per Claude API call
 
 // ─── API KEY: read from Vite environment variable set in Vercel ───────────────
 // In Vercel: Settings → Environment Variables → VITE_ANTHROPIC_KEY = sk-ant-...
 const ANTHROPIC_API_KEY = import.meta.env.VITE_ANTHROPIC_KEY ?? "";
 
-// ─── FETCH: Anthropic API + web_search (no CORS issues) ──────────────────────
-// Claude's servers fetch Yahoo Finance data — bypasses all browser CORS blocks
-async function fetchBatchViaClaude(tickers) {
-  if (!ANTHROPIC_API_KEY) throw new Error("API key not configured — add VITE_ANTHROPIC_KEY in Vercel environment variables");
+// ─── FETCH: Anthropic API + web_search ───────────────────────────────────────
+// Fetches price data one ticker at a time via Claude web search
+// Avoids all CORS issues since Claude's servers do the fetching
 
-  // Build a compact prompt asking for price returns in JSON
-  const tickerList = tickers.join(", ");
-  const prompt = `For each of these SGX/index tickers: ${tickerList}
+async function fetchOneTicker(ticker) {
+  if (!ANTHROPIC_API_KEY) throw new Error("No API key");
 
-Search Yahoo Finance and return ONLY a JSON object (no markdown, no explanation) with this exact structure:
-{
-  "TICKER": {"w1": <1-week % return as number>, "m1": <1-month % return>, "m3": <3-month % return>, "m6": <6-month % return>},
-  ...
-}
+  // Map internal keys to Yahoo Finance search terms
+  const searchTerm = ticker === "STI"
+    ? "Straits Times Index STI Singapore performance"
+    : `${ticker} stock price Singapore SGX`;
 
-For ^STI use key "STI". For SGX tickers like D05.SI use key "D05.SI".
-If data is unavailable for a ticker, set its value to null.
-Return ONLY the JSON object, nothing else.`;
+  // Ask for specific return periods clearly
+  const isSTI = ticker === "STI";
+  const name  = isSTI ? "Straits Times Index (^STI)" : ticker;
 
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
+  const prompt = `Search for the current ${name} price data on Yahoo Finance or a financial site.
+
+I need the percentage price change for these exact periods as of today:
+- 1 week change (5 trading days)
+- 1 month change (~21 trading days)  
+- 3 month change (~63 trading days)
+- 6 month change (~126 trading days)
+
+Respond with ONLY this JSON (use null if unavailable, numbers only — no % signs):
+{"w1": <number or null>, "m1": <number or null>, "m3": <number or null>, "m6": <number or null>}`;
+
+  const resp = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -45,23 +52,32 @@ Return ONLY the JSON object, nothing else.`;
     },
     body: JSON.stringify({
       model: "claude-haiku-4-5-20251001",
-      max_tokens: 1000,
+      max_tokens: 200,
       tools: [{ type: "web_search_20250305", name: "web_search" }],
       messages: [{ role: "user", content: prompt }]
     })
   });
 
-  if (!response.ok) throw new Error(`API ${response.status}`);
-  const data = await response.json();
+  if (!resp.ok) throw new Error(`API ${resp.status}: ${await resp.text()}`);
+  const data = await resp.json();
 
-  // Extract text content from response (Claude may use tool_use blocks first)
-  const textBlocks = data.content.filter(b => b.type === "text");
-  if (!textBlocks.length) throw new Error("No text in response");
+  // Find the last text block in the response
+  const textBlocks = (data.content || []).filter(b => b.type === "text");
+  if (!textBlocks.length) throw new Error("No text response");
   const raw = textBlocks[textBlocks.length - 1].text.trim();
 
-  // Parse JSON — strip markdown fences if present
-  const clean = raw.replace(/^```[a-zA-Z]*\n?/, "").replace(/\n?```$/, "").trim();
-  return JSON.parse(clean);
+  // Extract JSON from response — handle markdown fences and extra text
+  const jsonMatch = raw.match(/\{[^{}]*"w1"[^{}]*\}/s);
+  if (!jsonMatch) throw new Error(`Not valid JSON: ${raw.slice(0, 60)}`);
+  const parsed = JSON.parse(jsonMatch[0]);
+
+  // Validate — ensure all keys are numbers or null
+  const result = {};
+  for (const key of ["w1", "m1", "m3", "m6"]) {
+    const v = parsed[key];
+    result[key] = (v !== null && v !== undefined && !isNaN(Number(v))) ? Number(v) : null;
+  }
+  return result;
 }
 
 function computeReturns(history) {
@@ -146,46 +162,29 @@ export default function SGXMomentum() {
       })
     );
 
-    // Batch into groups for Claude API calls
-    const batches = [];
-    for (let i = 0; i < tickersNeeded.length; i += BATCH_SIZE) {
-      batches.push(tickersNeeded.slice(i, i + BATCH_SIZE));
-    }
+    setProgress({ done:0, total:tickersNeeded.length, current:"" });
 
-    setProgress({ done:0, total:batches.length, current:"" });
+    const results = {};
+    const errors  = [];
 
-    const results  = {};
-    const errors   = [];
-
-    for (let i = 0; i < batches.length; i++) {
+    for (let i = 0; i < tickersNeeded.length; i++) {
       if (abortRef.current) break;
-      const batch = batches[i];
-      setProgress({ done:i, total:batches.length,
-        current:`Batch ${i+1}/${batches.length}: ${batch.slice(0,3).join(", ")}…` });
+      const ticker = tickersNeeded[i];
+      setProgress({ done:i, total:tickersNeeded.length,
+        current: ticker === "STI" ? "^STI benchmark" : ticker });
       try {
-        const batchResult = await fetchBatchViaClaude(batch);
-        // batchResult is { "D05.SI": {w1,m1,m3,m6}, "STI": {...}, ... }
-        for (const ticker of batch) {
-          const ret = batchResult[ticker];
-          if (ret && typeof ret === "object" && ret !== null) {
-            results[ticker] = { returns: ret, error: null };
-          } else {
-            results[ticker] = { returns: null, error: "No data returned" };
-            if (ticker !== "STI") errors.push({ ticker, error: "No data returned" });
-          }
-        }
+        const ret = await fetchOneTicker(ticker);
+        results[ticker] = { returns: ret, error: null };
       } catch (e) {
-        // Batch failed — mark all tickers in batch as errored
-        for (const ticker of batch) {
-          results[ticker] = { returns: null, error: e.message };
-          if (ticker !== "STI") errors.push({ ticker, error: e.message });
-        }
+        results[ticker] = { returns: null, error: e.message };
+        if (ticker !== "STI") errors.push({ ticker, error: e.message });
+        else setStiError(e.message);
       }
-      // Small pause between batches to avoid rate limiting
-      if (i < batches.length - 1) await new Promise(r => setTimeout(r, 1000));
+      // Pause between calls to avoid rate limiting
+      if (i < tickersNeeded.length - 1) await new Promise(r => setTimeout(r, 500));
     }
 
-    setProgress({ done: batches.length, total: batches.length, current: "" });
+    setProgress({ done: tickersNeeded.length, total: tickersNeeded.length, current: "" });
     setStockData(results);
     setFetchErrors(errors);
 
@@ -335,7 +334,7 @@ export default function SGXMomentum() {
                 borderRadius:8, color: !ANTHROPIC_API_KEY ? "#ef4444" : "#fff",
                 cursor: (status==="loading" || !ANTHROPIC_API_KEY) ? "not-allowed" : "pointer",
                 fontSize:14, fontWeight:600, boxShadow: !ANTHROPIC_API_KEY ? "none" : "0 2px 8px rgba(37,99,235,0.3)" }}>
-              {!ANTHROPIC_API_KEY ? "🔑 API Key Missing" : status==="loading" ? `Fetching batch ${progress.done+1}/${progress.total}… ${pct}%` : "↻ Refresh Data"}
+              {!ANTHROPIC_API_KEY ? "🔑 API Key Missing" : status==="loading" ? `Fetching ${progress.current} (${progress.done}/${progress.total})…` : "↻ Refresh Data"}
             </button>
           </div>
         </div>
@@ -349,7 +348,7 @@ export default function SGXMomentum() {
                 transition:"width 0.3s", borderRadius:4 }} />
             </div>
             <div style={{ fontSize:11, color:"#475569", marginTop:4 }}>
-              {progress.current} (batch {progress.done}/{progress.total})
+              {progress.current} ({progress.done}/{progress.total})
             </div>
           </div>
         )}
@@ -460,7 +459,7 @@ export default function SGXMomentum() {
                       Click "Refresh Data" to run the momentum analysis
                     </div>
                     <div style={{ fontSize:13, color:"#334155", marginTop:8 }}>
-                      207 stocks · SGD ≥200M · 15 sectors · Top-5 scoring · 1 trade per sector · STI benchmark · ~9 API batches
+                      207 stocks · SGD ≥200M · 15 sectors · top-5 scoring · STI benchmark · ~70 API calls
                     </div>
                   </>
                 )}
@@ -929,7 +928,7 @@ export default function SGXMomentum() {
           <div><span style={{ color:"#475569", fontWeight:600 }}>Positions:</span> max {TOP_SECTORS} (one per sector)</div>
           <div><span style={{ color:"#475569", fontWeight:600 }}>Tiebreaker:</span> 3M return when gap ≤0.5%</div>
           <div><span style={{ color:"#475569", fontWeight:600 }}>Cash:</span> no sector beats STI / all ≤0%</div>
-          <div><span style={{ color:"#475569", fontWeight:600 }}>Data:</span> Claude API + web_search · ~9 batches · no CORS</div>
+          <div><span style={{ color:"#475569", fontWeight:600 }}>Data:</span> Claude API + web_search per ticker · no CORS</div>
         </div>
       </div>
     </div>
