@@ -1,12 +1,19 @@
 // api/prices.js — Vercel Serverless Function (ESM)
-// yahoo-finance2@2.14.2 — sequential fetch with delay to avoid rate limiting
+// yahoo-finance2@2.14.2
+// Uses built-in queue with concurrency=1 + explicit delay for rate limiting
 
 import yahooFinance from "yahoo-finance2";
 
-const WINDOWS = { w1: 5, m1: 21, m3: 63, m6: 126 };
-const DELAY_MS = 300; // ms between requests to avoid Yahoo rate limiting
+// Configure yahoo-finance2 to use concurrency=1 (sequential internally)
+// and point to query2 host which has slightly higher limits
+yahooFinance.setGlobalConfig({
+  queue: { concurrency: 1 },
+  YF_QUERY_HOST: "query2.finance.yahoo.com",
+});
 
-const sleep = ms => new Promise(r => setTimeout(r, ms));
+const WINDOWS  = { w1: 5, m1: 21, m3: 63, m6: 126 };
+const DELAY_MS = 2000; // 2s between requests = 30 req/min, well under Yahoo's limit
+const sleep    = ms => new Promise(r => setTimeout(r, ms));
 
 async function getReturns(ticker) {
   const symbol = ticker === "STI" ? "^STI" : ticker;
@@ -51,7 +58,7 @@ async function getReturns(ticker) {
     return result;
 
   } catch (e) {
-    console.error(`[prices] ${ticker}: ${e.message?.slice(0, 80)}`);
+    console.error(`[prices] ${ticker}: ${(e.message ?? "").slice(0, 100)}`);
     return null;
   }
 }
@@ -59,6 +66,7 @@ async function getReturns(ticker) {
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin",  "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  // Cache for 1 hour on Vercel CDN — same-day refreshes are instant
   res.setHeader("Cache-Control", "s-maxage=3600, stale-while-revalidate=86400");
 
   if (req.method === "OPTIONS") return res.status(200).end();
@@ -70,18 +78,16 @@ export default async function handler(req, res) {
   const list = tickers.split(",").map(t => t.trim()).filter(Boolean).slice(0, 25);
   if (!list.length) return res.status(400).json({ error: "empty list" });
 
-  console.log(`[prices] Fetching ${list.length}: ${list.join(", ")}`);
+  console.log(`[prices] Start: ${list.length} tickers, ${DELAY_MS}ms between each`);
 
-  // Sequential fetch with delay — avoids Yahoo Finance rate limiting
+  // Strictly sequential with delay — no parallelism
   const result = {};
   for (let i = 0; i < list.length; i++) {
-    const ticker = list[i];
-    result[ticker] = await getReturns(ticker);
-    if (i < list.length - 1) await sleep(DELAY_MS);
+    if (i > 0) await sleep(DELAY_MS);
+    result[list[i]] = await getReturns(list[i]);
   }
 
   const ok = Object.values(result).filter(v => v !== null).length;
   console.log(`[prices] Done: ${ok}/${list.length} OK`);
-
   return res.status(200).json(result);
 }
