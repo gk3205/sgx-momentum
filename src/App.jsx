@@ -21,8 +21,14 @@ const BATCH_SIZE = 20;
 async function fetchPriceBatch(tickers) {
   const param = tickers.join(",");
   const resp  = await fetch(`/api/prices?tickers=${encodeURIComponent(param)}`);
-  if (!resp.ok) throw new Error(`/api/prices returned ${resp.status}`);
-  return resp.json(); // { "D05.SI": {w1,m1,m3,m6}, "STI": {...}, ... }
+  if (!resp.ok) {
+    const errText = await resp.text().catch(() => "");
+    throw new Error(`/api/prices ${resp.status}: ${errText.slice(0, 100)}`);
+  }
+  const data = await resp.json();
+  // If the API returned an error object instead of price data
+  if (data.error) throw new Error(`API error: ${data.error}`);
+  return data; // { "D05.SI": {w1,m1,m3,m6}, "STI": {...}, ... }
 }
 
 function computeReturns(history) {
