@@ -1,9 +1,12 @@
 // api/prices.js — Vercel Serverless Function (ESM)
-// Pinned to yahoo-finance2@2.14.2 which has clean ESM default export
+// yahoo-finance2@2.14.2 — sequential fetch with delay to avoid rate limiting
 
 import yahooFinance from "yahoo-finance2";
 
 const WINDOWS = { w1: 5, m1: 21, m3: 63, m6: 126 };
+const DELAY_MS = 300; // ms between requests to avoid Yahoo rate limiting
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 async function getReturns(ticker) {
   const symbol = ticker === "STI" ? "^STI" : ticker;
@@ -48,7 +51,7 @@ async function getReturns(ticker) {
     return result;
 
   } catch (e) {
-    console.error(`[prices] ${ticker}: ${e.message}`);
+    console.error(`[prices] ${ticker}: ${e.message?.slice(0, 80)}`);
     return null;
   }
 }
@@ -69,12 +72,15 @@ export default async function handler(req, res) {
 
   console.log(`[prices] Fetching ${list.length}: ${list.join(", ")}`);
 
-  const entries = await Promise.all(
-    list.map(async ticker => [ticker, await getReturns(ticker)])
-  );
+  // Sequential fetch with delay — avoids Yahoo Finance rate limiting
+  const result = {};
+  for (let i = 0; i < list.length; i++) {
+    const ticker = list[i];
+    result[ticker] = await getReturns(ticker);
+    if (i < list.length - 1) await sleep(DELAY_MS);
+  }
 
-  const result = Object.fromEntries(entries);
-  const ok     = Object.values(result).filter(v => v !== null).length;
+  const ok = Object.values(result).filter(v => v !== null).length;
   console.log(`[prices] Done: ${ok}/${list.length} OK`);
 
   return res.status(200).json(result);
