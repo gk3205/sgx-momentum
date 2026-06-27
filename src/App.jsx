@@ -11,73 +11,18 @@ const TOP_SECTORS   = 3;
 const SCORE_NAMES   = 5;
 const MIN_VALID     = 3;
 
-// ─── API KEY: read from Vite environment variable set in Vercel ───────────────
-// In Vercel: Settings → Environment Variables → VITE_ANTHROPIC_KEY = sk-ant-...
-const ANTHROPIC_API_KEY = import.meta.env.VITE_ANTHROPIC_KEY ?? "";
+// ─── FETCH: Vercel serverless function /api/prices ───────────────────────────
+// Calls our own /api/prices.js which runs server-side on Vercel
+// Server-side fetches Yahoo Finance via yahoo-finance2 — no CORS, no auth needed
+// Batches tickers to minimise round trips (up to 20 per call)
 
-// ─── FETCH: Anthropic API + web_search ───────────────────────────────────────
-// Fetches price data one ticker at a time via Claude web search
-// Avoids all CORS issues since Claude's servers do the fetching
+const BATCH_SIZE = 20;
 
-async function fetchOneTicker(ticker) {
-  if (!ANTHROPIC_API_KEY) throw new Error("No API key");
-
-  // Map internal keys to Yahoo Finance search terms
-  const searchTerm = ticker === "STI"
-    ? "Straits Times Index STI Singapore performance"
-    : `${ticker} stock price Singapore SGX`;
-
-  // Ask for specific return periods clearly
-  const isSTI = ticker === "STI";
-  const name  = isSTI ? "Straits Times Index (^STI)" : ticker;
-
-  const prompt = `Search for the current ${name} price data on Yahoo Finance or a financial site.
-
-I need the percentage price change for these exact periods as of today:
-- 1 week change (5 trading days)
-- 1 month change (~21 trading days)  
-- 3 month change (~63 trading days)
-- 6 month change (~126 trading days)
-
-Respond with ONLY this JSON (use null if unavailable, numbers only — no % signs):
-{"w1": <number or null>, "m1": <number or null>, "m3": <number or null>, "m6": <number or null>}`;
-
-  const resp = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "anthropic-dangerous-direct-browser-access": "true",
-    },
-    body: JSON.stringify({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 200,
-      tools: [{ type: "web_search_20250305", name: "web_search" }],
-      messages: [{ role: "user", content: prompt }]
-    })
-  });
-
-  if (!resp.ok) throw new Error(`API ${resp.status}: ${await resp.text()}`);
-  const data = await resp.json();
-
-  // Find the last text block in the response
-  const textBlocks = (data.content || []).filter(b => b.type === "text");
-  if (!textBlocks.length) throw new Error("No text response");
-  const raw = textBlocks[textBlocks.length - 1].text.trim();
-
-  // Extract JSON from response — handle markdown fences and extra text
-  const jsonMatch = raw.match(/\{[^{}]*"w1"[^{}]*\}/s);
-  if (!jsonMatch) throw new Error(`Not valid JSON: ${raw.slice(0, 60)}`);
-  const parsed = JSON.parse(jsonMatch[0]);
-
-  // Validate — ensure all keys are numbers or null
-  const result = {};
-  for (const key of ["w1", "m1", "m3", "m6"]) {
-    const v = parsed[key];
-    result[key] = (v !== null && v !== undefined && !isNaN(Number(v))) ? Number(v) : null;
-  }
-  return result;
+async function fetchPriceBatch(tickers) {
+  const param = tickers.join(",");
+  const resp  = await fetch(`/api/prices?tickers=${encodeURIComponent(param)}`);
+  if (!resp.ok) throw new Error(`/api/prices returned ${resp.status}`);
+  return resp.json(); // { "D05.SI": {w1,m1,m3,m6}, "STI": {...}, ... }
 }
 
 function computeReturns(history) {
@@ -162,29 +107,44 @@ export default function SGXMomentum() {
       })
     );
 
-    setProgress({ done:0, total:tickersNeeded.length, current:"" });
+    // Split into batches of BATCH_SIZE
+    const batches = [];
+    for (let i = 0; i < tickersNeeded.length; i += BATCH_SIZE) {
+      batches.push(tickersNeeded.slice(i, i + BATCH_SIZE));
+    }
+    setProgress({ done:0, total:batches.length, current:"Loading prices…" });
 
     const results = {};
     const errors  = [];
 
-    for (let i = 0; i < tickersNeeded.length; i++) {
+    for (let i = 0; i < batches.length; i++) {
       if (abortRef.current) break;
-      const ticker = tickersNeeded[i];
-      setProgress({ done:i, total:tickersNeeded.length,
-        current: ticker === "STI" ? "^STI benchmark" : ticker });
+      const batch = batches[i];
+      setProgress({ done:i, total:batches.length,
+        current:`Batch ${i+1}/${batches.length}: ${batch.slice(0,4).join(", ")}…` });
       try {
-        const ret = await fetchOneTicker(ticker);
-        results[ticker] = { returns: ret, error: null };
+        const batchResult = await fetchPriceBatch(batch);
+        for (const ticker of batch) {
+          const ret = batchResult[ticker];
+          if (ret && (ret.w1 != null || ret.m1 != null || ret.m3 != null || ret.m6 != null)) {
+            results[ticker] = { returns: ret, error: null };
+          } else {
+            results[ticker] = { returns: null, error: "No data" };
+            if (ticker !== "STI") errors.push({ ticker, error: "No data from Yahoo Finance" });
+            else setStiError("No data");
+          }
+        }
       } catch (e) {
-        results[ticker] = { returns: null, error: e.message };
-        if (ticker !== "STI") errors.push({ ticker, error: e.message });
-        else setStiError(e.message);
+        for (const ticker of batch) {
+          results[ticker] = { returns: null, error: e.message };
+          if (ticker !== "STI") errors.push({ ticker, error: e.message });
+          else setStiError(e.message);
+        }
       }
-      // Pause between calls to avoid rate limiting
-      if (i < tickersNeeded.length - 1) await new Promise(r => setTimeout(r, 500));
+      if (i < batches.length - 1) await new Promise(r => setTimeout(r, 300));
     }
 
-    setProgress({ done: tickersNeeded.length, total: tickersNeeded.length, current: "" });
+    setProgress({ done: batches.length, total: batches.length, current: "" });
     setStockData(results);
     setFetchErrors(errors);
 
@@ -326,15 +286,13 @@ export default function SGXMomentum() {
                 style={{ padding:"8px 16px", background:"#1e293b", border:"1px solid #334155",
                   borderRadius:8, color:"#94a3b8", cursor:"pointer", fontSize:13 }}>Stop</button>
             )}
-            <button onClick={fetchAll} disabled={status==="loading" || !ANTHROPIC_API_KEY}
-              title={!ANTHROPIC_API_KEY ? "Add VITE_ANTHROPIC_KEY in Vercel environment variables" : ""}
+            <button onClick={fetchAll} disabled={status==="loading"}
               style={{ padding:"10px 22px",
-                background: !ANTHROPIC_API_KEY ? "#1e293b" : status==="loading" ? "#1e3a5f" : "linear-gradient(135deg,#2563eb,#1d4ed8)",
-                border: !ANTHROPIC_API_KEY ? "1px solid #ef4444" : "none",
-                borderRadius:8, color: !ANTHROPIC_API_KEY ? "#ef4444" : "#fff",
-                cursor: (status==="loading" || !ANTHROPIC_API_KEY) ? "not-allowed" : "pointer",
-                fontSize:14, fontWeight:600, boxShadow: !ANTHROPIC_API_KEY ? "none" : "0 2px 8px rgba(37,99,235,0.3)" }}>
-              {!ANTHROPIC_API_KEY ? "🔑 API Key Missing" : status==="loading" ? `Fetching ${progress.current} (${progress.done}/${progress.total})…` : "↻ Refresh Data"}
+                background: status==="loading" ? "#1e3a5f" : "linear-gradient(135deg,#2563eb,#1d4ed8)",
+                border:"none", borderRadius:8, color:"#fff",
+                cursor: status==="loading" ? "not-allowed" : "pointer",
+                fontSize:14, fontWeight:600, boxShadow:"0 2px 8px rgba(37,99,235,0.3)" }}>
+              {status==="loading" ? `${progress.current} (${progress.done}/${progress.total})` : "↻ Refresh Data"}
             </button>
           </div>
         </div>
@@ -435,34 +393,13 @@ export default function SGXMomentum() {
           <div>
             {status==="idle" && (
               <div style={{ textAlign:"center", padding:"60px 20px" }}>
-                {!ANTHROPIC_API_KEY ? (
-                  <div style={{ background:"#450a0a", border:"1px solid #991b1b",
-                    borderRadius:10, padding:"24px 32px", maxWidth:520, margin:"0 auto" }}>
-                    <div style={{ fontSize:32, marginBottom:12 }}>🔑</div>
-                    <div style={{ fontSize:16, fontWeight:700, color:"#fca5a5", marginBottom:8 }}>
-                      API Key Not Configured
-                    </div>
-                    <div style={{ fontSize:13, color:"#fca5a5", opacity:0.85, lineHeight:1.6 }}>
-                      Add your Anthropic API key in Vercel:<br/>
-                      <strong>Project → Settings → Environment Variables</strong><br/>
-                      Name: <code style={{ background:"#7f1d1d", padding:"1px 6px",
-                        borderRadius:4 }}>VITE_ANTHROPIC_KEY</code><br/>
-                      Value: <code style={{ background:"#7f1d1d", padding:"1px 6px",
-                        borderRadius:4 }}>sk-ant-...</code><br/><br/>
-                      Then redeploy for the variable to take effect.
-                    </div>
-                  </div>
-                ) : (
-                  <>
-                    <div style={{ fontSize:48, marginBottom:12 }}>📈</div>
-                    <div style={{ fontSize:16, fontWeight:600, color:"#475569" }}>
-                      Click "Refresh Data" to run the momentum analysis
-                    </div>
-                    <div style={{ fontSize:13, color:"#334155", marginTop:8 }}>
-                      207 stocks · SGD ≥200M · 15 sectors · top-5 scoring · STI benchmark · ~70 API calls
-                    </div>
-                  </>
-                )}
+                <div style={{ fontSize:48, marginBottom:12 }}>📈</div>
+                <div style={{ fontSize:16, fontWeight:600, color:"#475569" }}>
+                  Click "Refresh Data" to run the momentum analysis
+                </div>
+                <div style={{ fontSize:13, color:"#334155", marginTop:8 }}>
+                  207 stocks · SGD ≥200M · 15 sectors · top-5 scoring · STI benchmark · Yahoo Finance data
+                </div>
               </div>
             )}
 
@@ -928,7 +865,7 @@ export default function SGXMomentum() {
           <div><span style={{ color:"#475569", fontWeight:600 }}>Positions:</span> max {TOP_SECTORS} (one per sector)</div>
           <div><span style={{ color:"#475569", fontWeight:600 }}>Tiebreaker:</span> 3M return when gap ≤0.5%</div>
           <div><span style={{ color:"#475569", fontWeight:600 }}>Cash:</span> no sector beats STI / all ≤0%</div>
-          <div><span style={{ color:"#475569", fontWeight:600 }}>Data:</span> Claude API + web_search per ticker · no CORS</div>
+          <div><span style={{ color:"#475569", fontWeight:600 }}>Data:</span> /api/prices → yahoo-finance2 server-side · no CORS</div>
         </div>
       </div>
     </div>
