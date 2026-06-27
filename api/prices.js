@@ -1,35 +1,38 @@
 // api/prices.js — Vercel Serverless Function (ESM)
-// Uses yahoo-finance2 which handles Yahoo Finance auth internally
-// ESM imports required because package.json has "type":"module"
+// yahoo-finance2 v2.x with historical() method
 
-import yahooFinance from "yahoo-finance2";
+import * as yf from "yahoo-finance2";
+
+// yahoo-finance2 may export as default or as named - handle both
+const yahooFinance = yf.default ?? yf;
 
 const WINDOWS = { w1: 5, m1: 21, m3: 63, m6: 126 };
 
 async function getReturns(ticker) {
   const symbol = ticker === "STI" ? "^STI" : ticker;
   try {
-    const now    = new Date();
-    const from   = new Date(now.getTime() - 210 * 24 * 60 * 60 * 1000);
+    const now  = new Date();
+    const from = new Date(now.getTime() - 210 * 24 * 60 * 60 * 1000);
 
-    const chart  = await yahooFinance.chart(symbol, {
+    // Use historical() — universally available in all yahoo-finance2 v2.x versions
+    const rows = await yahooFinance.historical(symbol, {
       period1:  from,
       period2:  now,
       interval: "1d",
     });
 
-    const quotes = chart?.quotes;
-    if (!quotes || quotes.length < 5) {
-      console.log(`[prices] ${ticker}: only ${quotes?.length ?? 0} quotes`);
+    if (!rows || rows.length < 5) {
+      console.log(`[prices] ${ticker}: insufficient rows (${rows?.length ?? 0})`);
       return null;
     }
 
-    const closes = quotes
-      .map(q => q.adjclose ?? q.close)
+    // adjClose preferred, fall back to close
+    const closes = rows
+      .map(r => r.adjClose ?? r.close)
       .filter(c => c != null && !isNaN(c) && c > 0);
 
     if (closes.length < 5) {
-      console.log(`[prices] ${ticker}: only ${closes.length} valid closes`);
+      console.log(`[prices] ${ticker}: insufficient closes (${closes.length})`);
       return null;
     }
 
@@ -71,7 +74,9 @@ export default async function handler(req, res) {
 
   console.log(`[prices] Fetching ${list.length}: ${list.join(", ")}`);
 
-  // Parallel fetch — yahoo-finance2 handles auth internally
+  // Log what methods are available (debug for one call only)
+  console.log(`[prices] yf methods: ${Object.keys(yahooFinance).filter(k => typeof yahooFinance[k] === 'function').join(", ")}`);
+
   const entries = await Promise.all(
     list.map(async ticker => [ticker, await getReturns(ticker)])
   );
