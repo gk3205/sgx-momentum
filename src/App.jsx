@@ -60,9 +60,7 @@ Return ONLY the JSON object, nothing else.`;
   const raw = textBlocks[textBlocks.length - 1].text.trim();
 
   // Parse JSON — strip markdown fences if present
-  const clean = raw.replace(/^```[a-z]*
-?/i, "").replace(/
-?```$/,"").trim();
+  const clean = raw.replace(/^```[a-zA-Z]*\n?/, "").replace(/\n?```$/, "").trim();
   return JSON.parse(clean);
 }
 
