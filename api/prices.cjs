@@ -1,4 +1,4 @@
-// api/prices.js — Vercel Serverless Function
+// api/prices.cjs — Vercel Serverless Function
 // Uses Node.js built-in https — zero npm dependencies, no import issues
 // Handles Yahoo Finance cookie/crumb session server-side
 
