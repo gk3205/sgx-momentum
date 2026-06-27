@@ -12,9 +12,15 @@ const SCORE_NAMES   = 5;
 const MIN_VALID     = 3;
 const BATCH_SIZE    = 8;  // tickers per Claude API call
 
+// ─── API KEY: read from Vite environment variable set in Vercel ───────────────
+// In Vercel: Settings → Environment Variables → VITE_ANTHROPIC_KEY = sk-ant-...
+const ANTHROPIC_API_KEY = import.meta.env.VITE_ANTHROPIC_KEY ?? "";
+
 // ─── FETCH: Anthropic API + web_search (no CORS issues) ──────────────────────
 // Claude's servers fetch Yahoo Finance data — bypasses all browser CORS blocks
 async function fetchBatchViaClaude(tickers) {
+  if (!ANTHROPIC_API_KEY) throw new Error("API key not configured — add VITE_ANTHROPIC_KEY in Vercel environment variables");
+
   // Build a compact prompt asking for price returns in JSON
   const tickerList = tickers.join(", ");
   const prompt = `For each of these SGX/index tickers: ${tickerList}
@@ -31,7 +37,12 @@ Return ONLY the JSON object, nothing else.`;
 
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    },
     body: JSON.stringify({
       model: "claude-haiku-4-5-20251001",
       max_tokens: 1000,
@@ -318,13 +329,15 @@ export default function SGXMomentum() {
                 style={{ padding:"8px 16px", background:"#1e293b", border:"1px solid #334155",
                   borderRadius:8, color:"#94a3b8", cursor:"pointer", fontSize:13 }}>Stop</button>
             )}
-            <button onClick={fetchAll} disabled={status==="loading"}
+            <button onClick={fetchAll} disabled={status==="loading" || !ANTHROPIC_API_KEY}
+              title={!ANTHROPIC_API_KEY ? "Add VITE_ANTHROPIC_KEY in Vercel environment variables" : ""}
               style={{ padding:"10px 22px",
-                background: status==="loading" ? "#1e3a5f" : "linear-gradient(135deg,#2563eb,#1d4ed8)",
-                border:"none", borderRadius:8, color:"#fff",
-                cursor: status==="loading" ? "not-allowed" : "pointer",
-                fontSize:14, fontWeight:600, boxShadow:"0 2px 8px rgba(37,99,235,0.3)" }}>
-              {status==="loading" ? `Fetching batch ${progress.done+1}/${progress.total}… ${pct}%` : "↻ Refresh Data"}
+                background: !ANTHROPIC_API_KEY ? "#1e293b" : status==="loading" ? "#1e3a5f" : "linear-gradient(135deg,#2563eb,#1d4ed8)",
+                border: !ANTHROPIC_API_KEY ? "1px solid #ef4444" : "none",
+                borderRadius:8, color: !ANTHROPIC_API_KEY ? "#ef4444" : "#fff",
+                cursor: (status==="loading" || !ANTHROPIC_API_KEY) ? "not-allowed" : "pointer",
+                fontSize:14, fontWeight:600, boxShadow: !ANTHROPIC_API_KEY ? "none" : "0 2px 8px rgba(37,99,235,0.3)" }}>
+              {!ANTHROPIC_API_KEY ? "🔑 API Key Missing" : status==="loading" ? `Fetching batch ${progress.done+1}/${progress.total}… ${pct}%` : "↻ Refresh Data"}
             </button>
           </div>
         </div>
@@ -424,14 +437,35 @@ export default function SGXMomentum() {
         {activeTab==="signals" && (
           <div>
             {status==="idle" && (
-              <div style={{ textAlign:"center", padding:"60px 20px", color:"#334155" }}>
-                <div style={{ fontSize:48, marginBottom:12 }}>📈</div>
-                <div style={{ fontSize:16, fontWeight:600, color:"#475569" }}>
-                  Click "Refresh Data" to run the momentum analysis
-                </div>
-                <div style={{ fontSize:13, color:"#334155", marginTop:8 }}>
-                  207 stocks · SGD ≥200M · 15 sectors · Top-5 scoring · 1 trade per sector · STI benchmark · ~9 API batches
-                </div>
+              <div style={{ textAlign:"center", padding:"60px 20px" }}>
+                {!ANTHROPIC_API_KEY ? (
+                  <div style={{ background:"#450a0a", border:"1px solid #991b1b",
+                    borderRadius:10, padding:"24px 32px", maxWidth:520, margin:"0 auto" }}>
+                    <div style={{ fontSize:32, marginBottom:12 }}>🔑</div>
+                    <div style={{ fontSize:16, fontWeight:700, color:"#fca5a5", marginBottom:8 }}>
+                      API Key Not Configured
+                    </div>
+                    <div style={{ fontSize:13, color:"#fca5a5", opacity:0.85, lineHeight:1.6 }}>
+                      Add your Anthropic API key in Vercel:<br/>
+                      <strong>Project → Settings → Environment Variables</strong><br/>
+                      Name: <code style={{ background:"#7f1d1d", padding:"1px 6px",
+                        borderRadius:4 }}>VITE_ANTHROPIC_KEY</code><br/>
+                      Value: <code style={{ background:"#7f1d1d", padding:"1px 6px",
+                        borderRadius:4 }}>sk-ant-...</code><br/><br/>
+                      Then redeploy for the variable to take effect.
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <div style={{ fontSize:48, marginBottom:12 }}>📈</div>
+                    <div style={{ fontSize:16, fontWeight:600, color:"#475569" }}>
+                      Click "Refresh Data" to run the momentum analysis
+                    </div>
+                    <div style={{ fontSize:13, color:"#334155", marginTop:8 }}>
+                      207 stocks · SGD ≥200M · 15 sectors · Top-5 scoring · 1 trade per sector · STI benchmark · ~9 API batches
+                    </div>
+                  </>
+                )}
               </div>
             )}
 
