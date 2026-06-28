@@ -499,11 +499,11 @@ export default function SGXMomentum() {
                             {s.scored.map((st, i) => (
                               <tr key={st.code}
                                 style={{ borderTop:"1px solid #0f172a",
-                                  background: i===0 ? "rgba(37,99,235,0.08)" : "transparent" }}>
+                                  background: st.ticker===s.tradeStock.ticker ? "rgba(37,99,235,0.08)" : "transparent" }}>
                                 <td style={{ padding:"5px 8px" }}>
                                   <span style={{ fontSize:10, fontWeight:700,
-                                    color: i===0 ? "#10b981" : "#64748b" }}>
-                                    {i===0 ? "TRADE" : "SCORE"}
+                                    color: st.ticker===s.tradeStock.ticker ? "#10b981" : "#64748b" }}>
+                                    {st.ticker===s.tradeStock.ticker ? "TRADE" : "SCORE"}
                                   </span>
                                 </td>
                                 <td style={{ padding:"5px 8px", color:"#e2e8f0",
@@ -775,11 +775,11 @@ export default function SGXMomentum() {
                       <tbody>
                         {s.scored.map((st, i) => (
                           <tr key={st.code} style={{ borderBottom:"1px solid #1e293b",
-                            background: i===0 ? "rgba(37,99,235,0.06)" : "transparent" }}>
+                            background: st.ticker===s.tradeStock.ticker ? "rgba(37,99,235,0.06)" : "transparent" }}>
                             <td style={{ padding:"7px 12px" }}>
                               <span style={{ fontSize:10, fontWeight:700,
-                                color: i===0 ? "#10b981" : "#64748b" }}>
-                                {i===0 ? "TRADE" : "SCORE"}
+                                color: st.ticker===s.tradeStock.ticker ? "#10b981" : "#64748b" }}>
+                                {st.ticker===s.tradeStock.ticker ? "TRADE" : "SCORE"}
                               </span>
                             </td>
                             <td style={{ padding:"7px 12px", color:"#e2e8f0",
