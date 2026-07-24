@@ -72,7 +72,10 @@ function groupBySector(universe) {
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 const fmtPct   = (v, d = 2) => v == null ? "—" : `${v >= 0 ? "+" : ""}${v.toFixed(d)}%`;
-const fmtPct0  = (v) => v == null ? "—" : `${v >= 0 ? "+" : ""}${v.toFixed(0)}%`;
+// fmtPct0 takes a FRACTION (0-1), e.g. breadth, and renders it as a whole-number
+// percentage. fmtPct takes a value already expressed in percentage points
+// (returns/scores) — the two are not interchangeable.
+const fmtPct0  = (v) => v == null ? "—" : `${(v * 100).toFixed(0)}%`;
 const pctColor = v => v == null ? "#6b7280" : v > 0 ? "#10b981" : "#ef4444";
 const sigColor = t => ({ BUY:"#10b981", SELL:"#ef4444", HOLD:"#3b82f6", CASH:"#f59e0b" }[t] || "#6b7280");
 const rnkColor = r => r === 1 ? "#f59e0b" : r === 2 ? "#94a3b8" : "#b45309";
